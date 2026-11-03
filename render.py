@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import shutil
 import shlex
 import subprocess
 import sys
@@ -24,10 +25,12 @@ def remote_path(path):
 
 def rpc(args, action, **payload):
     payload.update(action=action)
-    result = subprocess.run(
-        ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', args.host,
-         'python3 ' + remote_path(getattr(args, 'remote_path', REMOTE)) + ' rpc'],
-        input=json.dumps(payload), text=True, capture_output=True)
+    if getattr(args, 'local', False):
+        command = [sys.executable, str(Path(__file__).resolve().with_name('recorder.py')), 'rpc']
+    else:
+        command = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', args.host,
+                   'python3 ' + remote_path(getattr(args, 'remote_path', REMOTE)) + ' rpc']
+    result = subprocess.run(command, input=json.dumps(payload), text=True, capture_output=True)
     if result.returncode:
         raise RuntimeError(result.stderr.strip() or 'Remote recorder failed')
     result = json.loads(result.stdout)
@@ -37,6 +40,9 @@ def rpc(args, action, **payload):
 
 
 def transfer(args, source, target):
+    if getattr(args, 'local', False):
+        shutil.copyfile(source, target)
+        return
     # Archive paths and generated names never contain shell metacharacters.
     remote = args.host + ':' + target
     subprocess.run(['scp', '-q', '-o', 'BatchMode=yes', '--',
@@ -64,6 +70,7 @@ def main():
                         help='SSH host (default: RENDER_MEDIA_HOST or spark-2)')
     parser.add_argument('--remote-path', default=os.environ.get('RENDER_MEDIA_REMOTE_PATH', REMOTE),
                         help='Remote recorder path (default: RENDER_MEDIA_REMOTE_PATH or ~/dev/render-media/recorder.py)')
+    parser.add_argument('--local', action='store_true', help='Run the recorder on this machine')
     sub = parser.add_subparsers(dest='command', required=True)
     sub.add_parser('doctor', help='Read-only backend/installation checks')
     p = sub.add_parser('submit', help='Archive and submit a ComfyUI API graph immediately')
@@ -141,10 +148,13 @@ def main():
         destination = args.directory / args.run_id
         if destination.exists():
             raise ValueError('Destination already exists: ' + str(destination))
-        subprocess.run(['scp', '-qr', '-o', 'BatchMode=yes', '--', args.host + ':' + result['path'], str(args.directory.resolve())], check=True)
+        if args.local:
+            shutil.copytree(result['path'], destination)
+        else:
+            subprocess.run(['scp', '-qr', '-o', 'BatchMode=yes', '--', args.host + ':' + result['path'], str(args.directory.resolve())], check=True)
         result = {'run_id': args.run_id, 'local_path': str(destination.resolve())}
     else:
-        payload = {k: v for k, v in vars(args).items() if k not in {'host', 'remote_path', 'command', 'wait', 'timeout'}}
+        payload = {k: v for k, v in vars(args).items() if k not in {'host', 'remote_path', 'local', 'command', 'wait', 'timeout'}}
         result = rpc(args, args.command, **payload)
         if args.command == 'rerun' and args.wait:
             result = wait(args, result['run_id'])
