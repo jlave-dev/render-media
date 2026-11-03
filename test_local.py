@@ -30,6 +30,10 @@ class LocalTransportTest(unittest.TestCase):
                                   text=True, capture_output=True, check=True)
             manifest = json.loads(show.stdout)
             self.assertEqual((Path(manifest['path']) / 'inputs/0.png').read_bytes(), b'local input')
+            fetched = subprocess.run([str(ROOT / 'render.py'), '--local', 'fetch', run_id, str(Path(home) / 'copies')],
+                                     env=env, text=True, capture_output=True, check=True)
+            copy = Path(json.loads(fetched.stdout)['local_path'])
+            self.assertEqual((copy / 'inputs/0.png').read_bytes(), b'local input')
 
 
 if __name__ == '__main__':
