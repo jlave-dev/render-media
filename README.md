@@ -6,6 +6,21 @@ This tool was built for a two-DGX-Spark setup. The remote recorder uses Linux pr
 
 The repository includes two small CPU example graphs and a test suite. The examples require a running, compatible ComfyUI backend. A UI workflow file alone is not an executable API graph. See `SKILL.md` for more commands.
 
+## Set up with an agent
+
+Paste this into your coding agent:
+
+```text
+Set up https://github.com/jlave-dev/render-media for my ComfyUI machine.
+Read its README and follow the setup instructions. First check my existing
+setup, then ask me only for details you cannot find, such as the SSH host.
+Keep any existing files and services safe. Install the client and remote
+recorder, configure the host so I can use it in future sessions, and run
+doctor. Tell me how to run a render and report any setup problems or
+remaining steps. Do not submit a render or change a running service without
+asking me first.
+```
+
 ## Setup
 
 Install Python 3.9 or newer on both machines, and SSH and SCP on the client. Configure key-based SSH access to the remote Linux machine. The remote machine needs a running ComfyUI process, its Python environment, and `nvidia-smi`. From a checkout on the client, copy the Python files to the remote machine:
