@@ -97,7 +97,7 @@ def process(backend):
             matches.append({'pid': int(proc.name), 'argv': argv, 'cwd': cwd, 'flags': flags,
                             'python_executable': argv[0], 'input': directory('--input-directory', 'input'),
                             'output': directory('--output-directory', 'output'), 'temp': directory('--temp-directory', 'temp'),
-                            'environment': {k: v for k, v in env.items() if k.startswith(('CUDA_', 'TORCH_', 'PYTORCH_', 'CUBLAS_', 'NVIDIA_', 'COMFY_'))}})
+                            'environment': {k: v for k, v in env.items() if k.startswith(('CUDA_', 'TORCH_', 'PYTORCH_', 'CUBLAS_', 'NVIDIA_', 'COMFY_', 'TF_H3_'))}})
         except (OSError, ValueError, UnicodeError):
             continue
     if len(matches) != 1:
@@ -110,10 +110,31 @@ def runtime(backend):
     result = subprocess.run([proc['python_executable'], str(HERE / 'inspect_runtime.py')],
                             input=json.dumps(proc), capture_output=True, text=True, check=True, timeout=60)
     snapshot = json.loads(result.stdout)
-    snapshot.update(process=proc, system_stats=api(backend, '/system_stats'), hostname=os.uname().nodename,
+    snapshot.update(process=proc, native_libraries=native_libraries(proc), system_stats=api(backend, '/system_stats'), hostname=os.uname().nodename,
                     driver=subprocess.run(['nvidia-smi', '--query-gpu=driver_version,name,uuid', '--format=csv,noheader'],
                                           capture_output=True, text=True, timeout=10).stdout.strip())
     return snapshot
+
+
+def native_libraries(proc):
+    configured = proc['environment'].get('TF_H3_LIB')
+    path = Path(configured) if configured else Path(proc['cwd']) / 'custom_nodes/tensorfold_h3/libtf_h3.so'
+    if not path.is_absolute():
+        path = Path(proc['cwd']) / path
+    if not configured and not path.is_file():
+        return []
+    path = path.resolve(strict=True)
+    before = signature(path)
+    sha = digest(path)
+    if signature(path) != before:
+        raise ValueError('Native library changed while hashing: ' + str(path))
+    result = {'path': str(path), 'sha256': sha, 'bytes': before[2]}
+    metadata = path.parent / 'build.json'
+    if metadata.is_file():
+        build = read(metadata)
+        if build.get('engine_sha256') == sha:
+            result['build'] = build
+    return [result]
 
 
 def signature(path):
@@ -128,11 +149,18 @@ def dedupe(file):
     store = ROOT / 'blobs'
     store.mkdir(parents=True, mode=0o700, exist_ok=True)
     target = store / (sha + '-' + file.name)
-    if target.exists():
-        os.remove(file)
-    else:
-        os.replace(file, target)
-    os.link(target, file)
+    try:
+        os.link(file, target)
+    except FileExistsError:
+        if digest(target) != sha:
+            raise ValueError('Source archive blob hash mismatch: ' + str(target))
+    if not os.path.samefile(file, target):
+        temporary = file.with_name('.link-' + uuid.uuid4().hex)
+        try:
+            os.link(target, temporary)
+            os.replace(temporary, file)
+        finally:
+            temporary.unlink(missing_ok=True)
     return sha
 
 
@@ -214,16 +242,18 @@ def capture_code(path, snapshot):
     gz = gzip.GzipFile(filename='', mode='wb', fileobj=raw, mtime=0)
     with tarfile.open(fileobj=gz, mode='w') as tar:
         for label, root in roots:
-            revision = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'], capture_output=True, text=True)
-            diff = subprocess.run(['git', '-C', str(root), 'diff', '--binary', 'HEAD'], capture_output=True)
-            source = {'label': label, 'path': str(root), 'commit': revision.stdout.strip() or None,
-                      'diff_sha256': hashlib.sha256(diff.stdout).hexdigest()}
+            top = subprocess.run(['git', '-C', str(root), 'rev-parse', '--show-toplevel'], capture_output=True, text=True)
+            own_repo = top.returncode == 0 and Path(top.stdout.strip()).resolve() == root
+            revision = subprocess.run(['git', '-C', str(root), 'rev-parse', 'HEAD'], capture_output=True, text=True) if own_repo else None
+            diff = subprocess.run(['git', '-C', str(root), 'diff', '--binary', 'HEAD'], capture_output=True) if own_repo else None
+            source = {'label': label, 'path': str(root), 'commit': (revision.stdout.strip() or None) if revision else None,
+                      'diff_sha256': hashlib.sha256(diff.stdout).hexdigest() if diff else None}
             sources.append(source)
             hashes = {}
             # Git paths include untracked source and preserve local changes. Runtime binaries are
             # identified by package versions, not copied into every generation archive.
-            listing = subprocess.run(['git', '-C', str(root), 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], capture_output=True)
-            files = [root / os.fsdecode(p) for p in listing.stdout.split(b'\0') if p] if listing.returncode == 0 else list(root.rglob('*')) if root.is_dir() else [root]
+            listing = subprocess.run(['git', '-C', str(root), 'ls-files', '-z', '--cached', '--others', '--exclude-standard'], capture_output=True) if own_repo else None
+            files = [root / os.fsdecode(p) for p in listing.stdout.split(b'\0') if p] if listing and listing.returncode == 0 else list(root.rglob('*')) if root.is_dir() else [root]
             for file in files:
                 if not file.is_file() or file.is_symlink() or any(part in {'.git', 'models', 'node_modules', '__pycache__', 'input', 'output', 'temp', 'user', '.venv', 'venv'} for part in file.relative_to(root).parts):
                     continue
@@ -581,7 +611,7 @@ def verify(path):
 
 
 def stack_identity(snapshot):
-    return {k: snapshot[k] for k in ['packages', 'python', 'driver', 'sources']} | {'flags': snapshot['process']['flags'], 'environment': snapshot['process']['environment']}
+    return {k: snapshot[k] for k in ['packages', 'python', 'driver', 'sources']} | {'flags': snapshot['process']['flags'], 'environment': snapshot['process']['environment'], 'native_libraries': snapshot.get('native_libraries', [])}
 
 
 def rerun(request):

@@ -331,6 +331,52 @@ class RecorderTests(unittest.TestCase):
         self.assertEqual(len(list((self.archive / 'blobs').glob('*-source.tar.gz'))), 2)
         self.assertNotEqual(archived[2].stat().st_ino, archived[0].stat().st_ino)
 
+    def test_corrupt_source_blob_does_not_delete_new_archive(self):
+        source = self.root / 'source.tar.gz'
+        source.write_bytes(b'correct archive')
+        blob = self.archive / 'blobs' / (digest(source) + '-source.tar.gz')
+        blob.parent.mkdir(parents=True)
+        blob.write_bytes(b'corrupt archive')
+        with self.assertRaisesRegex(ValueError, 'blob hash mismatch'):
+            r.dedupe(source)
+        self.assertEqual(source.read_bytes(), b'correct archive')
+
+    def test_snapshot_includes_custom_node_ignored_by_parent_git(self):
+        (self.code / '.gitignore').write_text('custom_nodes/\n')
+        node = self.code / 'custom_nodes' / 'local_node'
+        node.mkdir(parents=True)
+        (node / '__init__.py').write_text('VALUE = 1\n')
+        first, second = copy.deepcopy(self.snapshot), copy.deepcopy(self.snapshot)
+        (self.root / 'a').mkdir()
+        (self.root / 'b').mkdir()
+        r.capture_code(self.root / 'a', first)
+        (node / '__init__.py').write_text('VALUE = 2\n')
+        r.capture_code(self.root / 'b', second)
+        self.assertNotEqual(r.stack_identity(first), r.stack_identity(second))
+
+    def test_tensorfold_library_changes_stack_identity(self):
+        engine = self.root / 'libtf_h3.so'
+        engine.write_bytes(b'first engine')
+        proc = copy.deepcopy(self.proc)
+        proc['environment']['TF_H3_LIB'] = str(engine)
+        first, second = copy.deepcopy(self.snapshot), copy.deepcopy(self.snapshot)
+        first['native_libraries'] = r.native_libraries(proc)
+        engine.write_bytes(b'second engine')
+        second['native_libraries'] = r.native_libraries(proc)
+        first['sources'] = second['sources'] = []
+        self.assertNotEqual(r.stack_identity(first), r.stack_identity(second))
+
+    def test_tensorfold_build_metadata_must_match_engine(self):
+        engine = self.root / 'libtf_h3.so'
+        engine.write_bytes(b'engine')
+        proc = copy.deepcopy(self.proc)
+        proc['environment']['TF_H3_LIB'] = str(engine)
+        metadata = {'engine_sha256': digest(engine), 'source_revision': 'abc', 'source_diff': 'patch'}
+        write(self.root / 'build.json', metadata)
+        self.assertEqual(r.native_libraries(proc)[0]['build'], metadata)
+        engine.write_bytes(b'different engine')
+        self.assertNotIn('build', r.native_libraries(proc)[0])
+
     def test_canonical_output_alias_and_recollection(self):
         run_id, path = self.create()
         r.execute(run_id)
